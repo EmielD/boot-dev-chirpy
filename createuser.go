@@ -6,11 +6,14 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/emiel/chirpy/internal/auth"
+	"github.com/emiel/chirpy/internal/database"
 	"github.com/google/uuid"
 )
 
 type input struct {
-	Email string `json:"email"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 type User struct {
@@ -25,10 +28,18 @@ func createUserTask(cfg *ApiConfig) func(http.ResponseWriter, *http.Request) {
 		var input input
 		err := json.NewDecoder(r.Body).Decode(&input)
 		if err != nil {
-			fmt.Println("error decoding email from body")
+			fmt.Println("error decoding input from body")
 		}
 
-		dbUser, err := cfg.db.CreateUser(r.Context(), input.Email)
+		hashedPassword, err := auth.HashPassword(input.Password)
+		if err != nil {
+			fmt.Println("error hashing password")
+		}
+
+		dbUser, err := cfg.db.CreateUser(r.Context(),
+			database.CreateUserParams{
+				Email:          input.Email,
+				HashedPassword: hashedPassword})
 		if err != nil {
 			fmt.Println("could not create user")
 		}

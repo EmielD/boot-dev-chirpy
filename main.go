@@ -70,9 +70,11 @@ func main() {
 	mux.HandleFunc("GET "+adminPath, adminTask(&apiCfg))
 	mux.HandleFunc("POST "+adminPath+"reset", resetTask(&apiCfg))
 
+	mux.HandleFunc("POST /api/login", loginTask(&apiCfg))
 	mux.HandleFunc("POST /api/users", createUserTask(&apiCfg))
 	mux.HandleFunc("POST /api/chirps", ChirpsTask(&apiCfg))
 	mux.HandleFunc("GET /api/chirps", GetChirpsTask(&apiCfg))
+	mux.HandleFunc("GET /api/chirps/{chirpID}", GetChirpTask(&apiCfg))
 	mux.HandleFunc("GET /api/healthz", HealthTask)
 
 	server := &http.Server{

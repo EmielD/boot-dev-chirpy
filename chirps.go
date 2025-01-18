@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/emiel/chirpy/internal/database"
 	"github.com/google/uuid"
@@ -19,6 +20,14 @@ type response struct {
 type errorResponse struct {
 	Error   string `json:"error"`
 	User_Id string `json:"user_id"`
+}
+
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 func ChirpsTask(cfg *ApiConfig) func(http.ResponseWriter, *http.Request) {
@@ -45,9 +54,20 @@ func ChirpsTask(cfg *ApiConfig) func(http.ResponseWriter, *http.Request) {
 			respondWithError(w, http.StatusBadRequest, "error parsing user UUID", response.User_Id)
 		}
 
-		cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{Body: response.Body, UserID: parsedUuid})
+		chirpDb, err := cfg.db.CreateChirp(r.Context(), database.CreateChirpParams{Body: response.Body, UserID: parsedUuid})
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "error inserting chirp into db", response.User_Id)
+		}
 
-		respondWithJSON(w, 201, response)
+		chirp := Chirp{
+			ID:        chirpDb.ID,
+			CreatedAt: chirpDb.CreatedAt,
+			UpdatedAt: chirpDb.UpdatedAt,
+			Body:      chirpDb.Body,
+			UserID:    chirpDb.UserID,
+		}
+
+		respondWithJSON(w, chirp)
 	}
 }
 
@@ -73,16 +93,17 @@ func respondWithError(w http.ResponseWriter, code int, msg string, userId string
 	if err != nil {
 		log.Panicf("%v", err)
 	}
+
 	w.WriteHeader(code)
 	w.Write(result)
 }
 
-func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+func respondWithJSON(w http.ResponseWriter, payload interface{}) {
 	result, err := json.Marshal(&payload)
 	if err != nil {
 		log.Panicf("%v", err)
 	}
 
-	w.WriteHeader(code)
+	w.WriteHeader(http.StatusCreated)
 	w.Write(result)
 }
