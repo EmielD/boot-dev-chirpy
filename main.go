@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	"github.com/emiel/chirpy/internal/database"
@@ -14,100 +14,84 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type ApiConfig struct {
+type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
-}
-
-func (cfg *ApiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg.fileserverHits.Add(1)
-		fmt.Println(cfg.fileserverHits.Load())
-		next.ServeHTTP(w, r)
-	})
+	platform       string
+	jwtSecret      string
+	polkaKey       string
 }
 
 func main() {
+	const filepathRoot = "."
+	const port = "8080"
+
 	godotenv.Load()
-
-	const (
-		port       = ":8080"
-		assetsPath = "/app/assets/"
-		adminPath  = "/admin/"
-		appPath    = "/app/"
-		staticDir  = "./assets"
-	)
-
-	apiCfg := ApiConfig{}
-	mux := http.NewServeMux()
-
-	// set up connection to postgres database
-	dbUrl := os.Getenv("DB_URL")
-	fmt.Println(dbUrl)
-	db, err := sql.Open("postgres", dbUrl)
-	if err != nil {
-		log.Fatal(err)
+	dbURL := os.Getenv("DB_URL")
+	if dbURL == "" {
+		log.Fatal("DB_URL must be set")
 	}
-	defer db.Close()
+	platform := os.Getenv("PLATFORM")
+	if platform == "" {
+		log.Fatal("PLATFORM must be set")
+	}
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		log.Fatal("JWT_SECRET environment variable is not set")
+	}
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY environment variable is not set")
+	}
 
-	dBQueries := database.New(db)
-	apiCfg.db = dBQueries
+	dbConn, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Error opening database: %s", err)
+	}
+	dbQueries := database.New(dbConn)
 
-	// create the file server handler
-	fileServer := http.FileServer(http.Dir(staticDir))
-	strippedFileServer := http.StripPrefix(assetsPath, fileServer)
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		db:             dbQueries,
+		platform:       platform,
+		jwtSecret:      jwtSecret,
+		polkaKey:       polkaKey,
+	}
 
-	// create the index handler
-	indexHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "index.html")
-	})
+	mux := http.NewServeMux()
+	fsHandler := apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot))))
+	mux.Handle("/app/", fsHandler)
 
-	// add routes with middleware
-	mux.Handle("GET "+assetsPath, apiCfg.middlewareMetricsInc(strippedFileServer))
-	mux.Handle("GET "+appPath, apiCfg.middlewareMetricsInc(indexHandler))
+	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 
-	mux.HandleFunc("GET "+adminPath, adminTask(&apiCfg))
-	mux.HandleFunc("POST "+adminPath+"reset", resetTask(&apiCfg))
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.handlerWebhook)
 
-	mux.HandleFunc("POST /api/login", loginTask(&apiCfg))
-	mux.HandleFunc("POST /api/users", createUserTask(&apiCfg))
-	mux.HandleFunc("POST /api/chirps", ChirpsTask(&apiCfg))
-	mux.HandleFunc("GET /api/chirps", GetChirpsTask(&apiCfg))
-	mux.HandleFunc("GET /api/chirps/{chirpID}", GetChirpTask(&apiCfg))
-	mux.HandleFunc("GET /api/healthz", HealthTask)
+	mux.HandleFunc("POST /api/login", apiCfg.handlerLogin)
+	mux.HandleFunc("POST /api/refresh", apiCfg.handlerRefresh)
+	mux.HandleFunc("POST /api/revoke", apiCfg.handlerRevoke)
 
-	server := &http.Server{
-		Addr:    port,
+	mux.HandleFunc("POST /api/users", apiCfg.handlerUsersCreate)
+	mux.HandleFunc("PUT /api/users", apiCfg.handlerUsersUpdate)
+
+	mux.HandleFunc("POST /api/chirps", apiCfg.handlerChirpsCreate)
+	mux.HandleFunc("GET /api/chirps", apiCfg.handlerChirpsRetrieve)
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.handlerChirpsGet)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.handlerChirpsDelete)
+
+	mux.HandleFunc("POST /admin/reset", apiCfg.handlerReset)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.handlerMetrics)
+
+	srv := &http.Server{
+		Addr:    ":" + port,
 		Handler: mux,
 	}
 
-	fmt.Println("Starting server..")
-	log.Fatal(server.ListenAndServe())
+	log.Printf("Serving on port: %s\n", port)
+	log.Fatal(srv.ListenAndServe())
+
+	for _, e := range os.Environ() {
+    if strings.Contains(e, "POLKA") {
+        fmt.Println(e)
+    }
 }
-
-func resetTask(cfg *ApiConfig) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-
-		cfg.db.Reset(context.Background())
-		cfg.fileserverHits.Store(0)
-	}
-}
-
-func adminTask(cfg *ApiConfig) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Header().Add("Content-Type", "text/html")
-
-		template :=
-			fmt.Sprintf(`<html>
- 				 			<body>
-    							<h1>Welcome, Chirpy Admin</h1>
-    							<p>Chirpy has been visited %d times!</p>
-  							</body>
-						</html>`, cfg.fileserverHits.Load())
-
-		w.Write([]byte(template))
-	}
 }
